@@ -135,6 +135,7 @@ import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
@@ -232,7 +233,9 @@ import android.view.inputmethod.InputMethodManagerInternal;
 import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.logging.MetricsLogger;
+import com.android.internal.os.DeviceKeyHandler;
 import com.android.internal.policy.IKeyguardDismissCallback;
+import com.android.internal.policy.IKeyguardService;
 import com.android.internal.policy.IShortcutService;
 import com.android.internal.policy.PhoneWindow;
 import com.android.internal.statusbar.IStatusBarService;
@@ -253,6 +256,12 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.List;
+import java.lang.reflect.Constructor;
+
+import org.slim.framework.internal.policy.HardwareKeyHandler;
+import slim.provider.SlimSettings;
+
+import dalvik.system.PathClassLoader;
 
 /**
  * WindowManagerPolicy implementation for the Android phone UI.  This
@@ -398,6 +407,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     /** Amount of time (in milliseconds) a toast window can be shown. */
     public static final int TOAST_WINDOW_TIMEOUT = 3500; // 3.5 seconds
 
+    private DeviceKeyHandler mDeviceKeyHandler;
+
     /**
      * Lock protecting internal state.  Must not call out into window
      * manager with lock held.  (This lock will be acquired in places
@@ -538,6 +549,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     boolean mWakeGestureEnabledSetting;
     MyWakeGestureListener mWakeGestureListener;
+
+    private HardwareKeyHandler mHardwareKeyHandler;
 
     // Default display does not rotate, apps that require non-default orientation will have to
     // have the orientation emulated.
@@ -723,6 +736,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     int mIncallBackBehavior;
 
     Display mDisplay;
+
+    private int mShortSizeDp;
 
     private int mDisplayRotation;
 
@@ -977,6 +992,21 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     UserHandle.USER_ALL);
             resolver.registerContentObserver(Settings.Global.getUriFor(
                     Settings.Global.POLICY_CONTROL), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(SlimSettings.System.getUriFor(
+                    SlimSettings.System.NAVIGATION_BAR_CAN_MOVE), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(SlimSettings.System.getUriFor(
+                    SlimSettings.System.NAVIGATION_BAR_HEIGHT), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(SlimSettings.System.getUriFor(
+                    SlimSettings.System.NAVIGATION_BAR_HEIGHT_LANDSCAPE), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(SlimSettings.System.getUriFor(
+                    SlimSettings.System.NAVIGATION_BAR_WIDTH), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(SlimSettings.System.getUriFor(
+                    SlimSettings.System.NAVIGATION_BAR_SHOW), false, this,
                     UserHandle.USER_ALL);
             updateSettings();
         }
@@ -1912,6 +1942,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         try {
             mOrientationListener.setCurrentRotation(windowManager.getDefaultDisplayRotation());
         } catch (RemoteException ex) { }
+
+        if (mContext.getResources().getInteger(
+                org.slim.framework.internal.R.integer.config_deviceHardwareKeys) > 0) {
+            mHardwareKeyHandler = new HardwareKeyHandler(mContext, mHandler);
+        }
+
         mSettingsObserver = new SettingsObserver(mHandler);
         mSettingsObserver.observe();
         mShortcutManager = new ShortcutManager(context);
@@ -2131,6 +2167,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         mWindowManagerInternal.registerAppTransitionListener(
                 mStatusBarController.getAppTransitionListener());
+
         mWindowManagerInternal.registerAppTransitionListener(new AppTransitionListener() {
             @Override
             public int onAppTransitionStartingLocked(int transit, IBinder openToken,
@@ -2151,6 +2188,28 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                         mWindowManagerFuncs.notifyKeyguardTrustedChanged();
                     }
                 });
+
+        String deviceKeyHandlerLib = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerLib);
+
+        String deviceKeyHandlerClass = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerClass);
+
+        if (!deviceKeyHandlerLib.isEmpty() && !deviceKeyHandlerClass.isEmpty()) {
+            PathClassLoader loader =  new PathClassLoader(deviceKeyHandlerLib,
+                    getClass().getClassLoader());
+            try {
+                Class<?> klass = loader.loadClass(deviceKeyHandlerClass);
+                Constructor<?> constructor = klass.getConstructor(Context.class);
+                mDeviceKeyHandler = (DeviceKeyHandler) constructor.newInstance(
+                        mContext);
+                if(DEBUG) Slog.d(TAG, "Device key handler loaded");
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not instantiate device key handler "
+                        + deviceKeyHandlerClass + " from class "
+                        + deviceKeyHandlerLib, e);
+            }
+        }
     }
 
     /**
@@ -2223,14 +2282,19 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         }
 
         // SystemUI (status bar) layout policy
-        int shortSizeDp = shortSize * DisplayMetrics.DENSITY_DEFAULT / density;
+        mShortSizeDp = shortSize * DisplayMetrics.DENSITY_DEFAULT / density;
         int longSizeDp = longSize * DisplayMetrics.DENSITY_DEFAULT / density;
 
-        // Allow the navigation bar to move on non-square small devices (phones).
-        mNavigationBarCanMove = width != height && shortSizeDp < 600;
+        // Allow the navigation bar to move on small devices (phones).
+        mNavigationBarCanMove = SlimSettings.System.getIntForUser(mContext.getContentResolver(),
+                    SlimSettings.System.NAVIGATION_BAR_CAN_MOVE,
+                    mShortSizeDp < 600 ? 1 : 0, UserHandle.USER_CURRENT) == 1;
 
-        mHasNavigationBar = res.getBoolean(com.android.internal.R.bool.config_showNavigationBar);
-
+        final int showByDefault = mContext.getResources().getBoolean(
+                    com.android.internal.R.bool.config_showNavigationBar) ? 1 : 0;
+        mHasNavigationBar = SlimSettings.System.getIntForUser(mContext.getContentResolver(),
+                    SlimSettings.System.NAVIGATION_BAR_SHOW, showByDefault,
+                    UserHandle.USER_CURRENT) == 1;
         // Allow a system property to override this. Used by the emulator.
         // See also hasNavigationBar().
         String navBarOverride = SystemProperties.get("qemu.hw.mainkeys");
@@ -2261,7 +2325,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         // Only force the default orientation if the screen is xlarge, at least 960dp x 720dp, per
         // http://developer.android.com/guide/practices/screens_support.html#range
-        mForceDefaultOrientation = longSizeDp >= 960 && shortSizeDp >= 720 &&
+        mForceDefaultOrientation = longSizeDp >= 960 && mShortSizeDp >= 720 &&
                 res.getBoolean(com.android.internal.R.bool.config_forceDefaultOrientation) &&
                 // For debug purposes the next line turns this feature off with:
                 // $ adb shell setprop config.override_forced_orient true
@@ -2336,6 +2400,47 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 updateRotation = true;
                 updateOrientationListenerLp();
             }
+
+            mNavigationBarCanMove = SlimSettings.System.getIntForUser(resolver,
+                    SlimSettings.System.NAVIGATION_BAR_CAN_MOVE,
+                    mShortSizeDp < 600 ? 1 : 0, UserHandle.USER_CURRENT) == 1;
+
+            final int showByDefault = mContext.getResources().getBoolean(
+                    com.android.internal.R.bool.config_showNavigationBar) ? 1 : 0;
+            mHasNavigationBar = SlimSettings.System.getIntForUser(resolver,
+                    SlimSettings.System.NAVIGATION_BAR_SHOW, showByDefault,
+                    UserHandle.USER_CURRENT) == 1;
+
+            // Height of the navigation bar when presented horizontally at bottom
+            mNavigationBarHeightForRotationDefault[mPortraitRotation] =
+            mNavigationBarHeightForRotationDefault[mUpsideDownRotation] =
+                    SlimSettings.System.getIntForUser(
+                        mContext.getContentResolver(), SlimSettings.System.NAVIGATION_BAR_HEIGHT,
+                        mContext.getResources().getDimensionPixelSize(
+                        com.android.internal.R.dimen.navigation_bar_height),
+                        UserHandle.USER_CURRENT);
+            mNavigationBarHeightForRotationDefault[mLandscapeRotation] =
+            mNavigationBarHeightForRotationDefault[mSeascapeRotation] =
+                    SlimSettings.System.getIntForUser(
+                        mContext.getContentResolver(),
+                        SlimSettings.System.NAVIGATION_BAR_HEIGHT_LANDSCAPE,
+                        mContext.getResources()
+                                .getDimensionPixelSize(
+                                    com.android.internal.R.dimen.navigation_bar_height_landscape),
+                        UserHandle.USER_CURRENT);
+
+            // Width of the navigation bar when presented vertically along one side
+            mNavigationBarWidthForRotationDefault[mPortraitRotation] =
+            mNavigationBarWidthForRotationDefault[mUpsideDownRotation] =
+            mNavigationBarWidthForRotationDefault[mLandscapeRotation] =
+            mNavigationBarWidthForRotationDefault[mSeascapeRotation] =
+                    SlimSettings.System.getIntForUser(
+                        mContext.getContentResolver(),
+                        SlimSettings.System.NAVIGATION_BAR_WIDTH,
+                        mContext.getResources()
+                                .getDimensionPixelSize(
+                                    com.android.internal.R.dimen.navigation_bar_width),
+                        UserHandle.USER_CURRENT);
 
             if (mSystemReady) {
                 int pointerLocation = Settings.System.getIntForUser(resolver,
@@ -3333,11 +3438,30 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         final int flags = event.getFlags();
         final boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         final boolean canceled = event.isCanceled();
+        final boolean longpress = (flags & KeyEvent.FLAG_LONG_PRESS) != 0;
+        final boolean virtualKey = event.getDeviceId() == KeyCharacterMap.VIRTUAL_KEYBOARD;
 
         if (DEBUG_INPUT) {
             Log.d(TAG, "interceptKeyTi keyCode=" + keyCode + " down=" + down + " repeatCount="
                     + repeatCount + " keyguardOn=" + keyguardOn + " mHomePressed=" + mHomePressed
                     + " canceled=" + canceled);
+        }
+
+        if (mHardwareKeyHandler != null && !keyguardOn && !virtualKey) {
+            if (mHardwareKeyHandler.handleKeyEvent(keyCode, repeatCount, down,
+                   canceled, longpress, keyguardOn)) {
+                return -1;
+            }
+        }
+
+        // If the boot mode is power off alarm, we should not dispatch the several physical keys
+        // in power off alarm UI to avoid pausing power off alarm UI.
+        boolean isAlarmBoot = SystemProperties.getBoolean("ro.alarm_boot", false);
+        if (isAlarmBoot && (keyCode == KeyEvent.KEYCODE_HOME
+                || keyCode == KeyEvent.KEYCODE_SEARCH
+                || keyCode == KeyEvent.KEYCODE_MENU
+                || keyCode == KeyEvent.KEYCODE_APP_SWITCH)) {
+            return -1;
         }
 
         // If we think we might have a volume down & power key chord on the way
@@ -3819,6 +3943,18 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     mShortcutKeyServices.delete(shortcutCode);
                 }
                 return -1;
+            }
+        }
+
+        // Specific device key handling
+        if (mDeviceKeyHandler != null) {
+            try {
+                // The device only should consume known keys.
+                if (mDeviceKeyHandler.handleKeyEvent(event)) {
+                    return -1;
+                }
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not dispatch event to device key handler", e);
             }
         }
 
@@ -6000,7 +6136,20 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         boolean useHapticFeedback = down
                 && (policyFlags & WindowManagerPolicy.FLAG_VIRTUAL) != 0
-                && event.getRepeatCount() == 0;
+                && event.getRepeatCount() == 0
+                && (mHardwareKeyHandler != null && !mHardwareKeyHandler.isHwKeysDisabled());
+
+        // Specific device key handling
+        if (mDeviceKeyHandler != null) {
+            try {
+                // The device only should consume known keys.
+                if (mDeviceKeyHandler.handleKeyEvent(event)) {
+                    return 0;
+                }
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not dispatch event to device key handler", e);
+            }
+        }
 
         // Handle special keys.
         switch (keyCode) {
