@@ -133,7 +133,7 @@ public class NavigationBarFragment extends Fragment implements Callbacks {
     private int mNavigationBarMode;
     private boolean mAccessibilityFeedbackEnabled;
     private AccessibilityManager mAccessibilityManager;
-    private MagnificationContentObserver mMagnificationObserver;
+    private SettingsObserver mSettingsObserver;
     private ContentResolver mContentResolver;
     private final MetricsLogger mMetricsLogger = Dependency.get(MetricsLogger.class);
 
@@ -190,8 +190,7 @@ public class NavigationBarFragment extends Fragment implements Callbacks {
         @Override
         public void onBackButtonAlphaChanged(float alpha, boolean animate) {
             final ButtonDispatcher backButton = mNavigationBarView.getBackButton();
-            backButton.setVisibility(alpha > 0 ? View.VISIBLE : View.INVISIBLE);
-            backButton.setAlpha(alpha, animate);
+            backButton.setVisibility(View.INVISIBLE);
         }
     };
 
@@ -210,11 +209,11 @@ public class NavigationBarFragment extends Fragment implements Callbacks {
         Dependency.get(AccessibilityManagerWrapper.class).addCallback(
                 mAccessibilityListener);
         mContentResolver = getContext().getContentResolver();
-        mMagnificationObserver = new MagnificationContentObserver(
+        mSettingsObserver = new SettingsObserver(
                 getContext().getMainThreadHandler());
         mContentResolver.registerContentObserver(Settings.Secure.getUriFor(
                 Settings.Secure.ACCESSIBILITY_DISPLAY_MAGNIFICATION_NAVBAR_ENABLED), false,
-                mMagnificationObserver, UserHandle.USER_ALL);
+                mSettingsObserver, UserHandle.USER_ALL);
 
         if (savedInstanceState != null) {
             mDisabledFlags1 = savedInstanceState.getInt(EXTRA_DISABLE_STATE, 0);
@@ -250,7 +249,7 @@ public class NavigationBarFragment extends Fragment implements Callbacks {
         mCommandQueue.removeCallbacks(this);
         Dependency.get(AccessibilityManagerWrapper.class).removeCallback(
                 mAccessibilityListener);
-        mContentResolver.unregisterContentObserver(mMagnificationObserver);
+        mContentResolver.unregisterContentObserver(mSettingsObserver);
         try {
             WindowManagerGlobal.getWindowManagerService()
                     .removeRotationWatcher(mRotationWatcher);
@@ -1039,9 +1038,9 @@ public class NavigationBarFragment extends Fragment implements Callbacks {
     private final AccessibilityServicesStateChangeListener mAccessibilityListener =
             this::updateAccessibilityServicesState;
 
-    private class MagnificationContentObserver extends ContentObserver {
+    private class SettingsObserver extends ContentObserver {
 
-        public MagnificationContentObserver(Handler handler) {
+        public SettingsObserver(Handler handler) {
             super(handler);
         }
 

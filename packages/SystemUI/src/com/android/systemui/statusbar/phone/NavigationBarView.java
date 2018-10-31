@@ -682,8 +682,11 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
             }
         }
 
-        getBackButton().setVisibility(disableBack      ? View.INVISIBLE : View.VISIBLE);
-        getHomeButton().setVisibility(disableHome      ? View.INVISIBLE : View.VISIBLE);
+        boolean forceShowBack = pinningActive || (disableHome && !disableBack);
+
+        getBackButton().setVisibility(disableBack || !forceShowBack
+                ? View.INVISIBLE : View.VISIBLE);
+        getHomeButton().setVisibility(disableHome ? View.INVISIBLE : View.VISIBLE);
         getRecentsButton().setVisibility(disableRecent ? View.INVISIBLE : View.VISIBLE);
     }
 
