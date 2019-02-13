@@ -82,6 +82,7 @@ public final class ShutdownThread extends Thread {
     private static boolean sIsStarted = false;
 
     private static boolean mReboot;
+    private static boolean mRebootCustom;
     private static boolean mRebootSafeMode;
     private static boolean mRebootHasProgressBar;
     private static String mReason;
@@ -142,6 +143,7 @@ public final class ShutdownThread extends Thread {
      */
     public static void shutdown(final Context context, String reason, boolean confirm) {
         mReboot = false;
+        mRebootCustom = false;
         mRebootSafeMode = false;
         mReason = reason;
         shutdownInner(context, confirm);
@@ -228,12 +230,18 @@ public final class ShutdownThread extends Thread {
      * @param reason code to pass to the kernel (e.g. "recovery"), or null.
      * @param confirm true if user confirmation is needed before shutting down.
      */
-    public static void reboot(final Context context, String reason, boolean confirm) {
+    public static void rebootCustom(final Context context, String reason,
+            boolean confirm, boolean custom) {
         mReboot = true;
+        mRebootCustom = custom;
         mRebootSafeMode = false;
         mRebootHasProgressBar = false;
         mReason = reason;
         shutdownInner(context, confirm);
+    }
+
+    public static void reboot(final Context context, String reason, boolean confirm) {
+        rebootCustom(context, reason, confirm, false);
     }
 
     /**
@@ -251,6 +259,7 @@ public final class ShutdownThread extends Thread {
         }
 
         mReboot = true;
+        mRebootCustom = false;
         mRebootSafeMode = true;
         mRebootHasProgressBar = false;
         mReason = null;
@@ -307,6 +316,9 @@ public final class ShutdownThread extends Thread {
                             com.android.internal.R.string.reboot_to_update_reboot));
             }
         } else if (mReason != null && mReason.equals(PowerManager.REBOOT_RECOVERY)) {
+            if (mRebootCustom && showSysuiReboot()) {
+                return null;
+            }
             if (RescueParty.isAttemptingFactoryReset()) {
                 // We're not actually doing a factory reset yet; we're rebooting
                 // to ask the user if they'd like to reset, so give them a less
